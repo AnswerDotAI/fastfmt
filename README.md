@@ -29,12 +29,20 @@ cargo fastfmt src lib.rs # format specific files or directories
 tighter caps: 105 columns, or 80 for a two-statement block. rustfmt must be on
 PATH (`rustup component add rustfmt`).
 
+On each normal run, fastfmt creates or updates the target project's
+`rustfmt.toml` with `disable_all_formatting = true`. This makes accidental
+`cargo fmt` and editor rustfmt runs harmless; fastfmt overrides the setting for
+its own rustfmt pass. In `--check` mode the config is never written, and a
+missing or disabled guard is reported as a required update.
+
 ## What gets joined
 
 A block joins onto one line only when nothing in it is a comment or spans
-multiple lines itself, and the result fits the cap: fn bodies with one
-statement, if/else and loop bodies with one or two, match/struct/enum bodies
-with up to three arms, variants, or fields, and single-item impl blocks.
+multiple lines itself, and the result fits the cap: fn, if/else, and loop bodies
+with one statement or expression, match/struct/enum bodies with up to three
+arms, variants, or fields, and single-item impl blocks. Semicolons are preserved
+exactly. A statement-position `else` starts on a new line; an `if`/`else` used
+as a value stays on one line.
 Joins run innermost-first to a fixpoint, so nested one-liners collapse fully.
 Match arms stay expanded, and any block containing a comment or a multi-line
 string is left exactly as rustfmt wrote it.

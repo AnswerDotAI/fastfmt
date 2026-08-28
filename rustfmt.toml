@@ -1,0 +1,2 @@
+# `cargo fmt` is intentionally disabled; use `cargo fastfmt`.
+disable_all_formatting = true
