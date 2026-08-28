@@ -1,0 +1,14 @@
+[package]
+name = "fastfmt"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "cargo fmt plus fastai-style compaction: keeps simple one-line constructs on one line"
+
+[[bin]]
+name = "cargo-fastfmt"
+path = "src/main.rs"
+
+[dependencies]
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"

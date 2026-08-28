@@ -1,0 +1,33 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fastfmt"
+dynamic = ["version"]
+description = "cargo fmt plus fastai-style compaction: keeps simple one-line constructs on one line"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+readme = "README.md"
+authors = [{name = "Jeremy Howard", email = "github@jhoward.fastmail.fm"}]
+classifiers = ["Programming Language :: Rust"]
+
+[project.optional-dependencies]
+dev = ["fastship>=0.0.11", "maturin>=1.0,<2.0", "pytest"]
+
+[project.urls]
+Homepage = "https://github.com/AnswerDotAI/fastfmt"
+Repository = "https://github.com/AnswerDotAI/fastfmt"
+Issues = "https://github.com/AnswerDotAI/fastfmt/issues"
+
+[tool.maturin]
+bindings = "bin"
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
+
+[tool.fastship]
+branch = "main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
