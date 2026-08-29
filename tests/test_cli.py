@@ -35,6 +35,11 @@ fn statement_else(c: bool) {
     }
     drop(3);
 }
+impl F {
+    fn wide_assignment() {
+        let inner = Arc::new(DapInner { outgoing, pending: pending.clone(), close: close.clone(), closed: closed.clone(), next_seq: AtomicU64::new(1) });
+    }
+}
 """
 
 def test_fastfmt_binary(tmp_path):
@@ -55,6 +60,8 @@ def test_fastfmt_binary(tmp_path):
     assert 'for fd in fds { let _ = fd.checked_add(1); }' in out
     assert 'drop(1);\n        drop(2);' in out
     assert 'if c { drop(1); }\n    else { drop(2); }' in out
+    assert ('        let inner = Arc::new(DapInner { outgoing, pending: pending.clone(), close: close.clone(), '
+        'closed: closed.clone(), next_seq: AtomicU64::new(1) });') in out
     assert subprocess.run(['cargo-fastfmt', '--check'], cwd=tmp_path).returncode == 0
     f.write_text(BROKEN)
     subprocess.run(['cargo', 'fmt'], cwd=tmp_path, check=True)

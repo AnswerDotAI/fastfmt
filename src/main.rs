@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tree_sitter::{Node, Parser};
 
-const DEFAULT_WIDTH: usize = 150; // when neither --width nor a rustfmt.toml max_width applies
+const DEFAULT_WIDTH: usize = 160; // when neither --width nor a rustfmt.toml max_width applies
 
 fn parser() -> Parser {
     let mut p = Parser::new();
@@ -99,9 +99,7 @@ fn compact_round(src: &str, width: usize) -> String {
 fn statement_if(node: Node, src: &str) -> bool {
     let mut cur = node;
     while let Some(parent) = cur.parent() {
-        if parent.kind() == "expression_statement" {
-            return parent.next_named_sibling().is_some() || src[parent.byte_range()].trim_end().ends_with(';');
-        }
+        if parent.kind() == "expression_statement" { return parent.next_named_sibling().is_some() || src[parent.byte_range()].trim_end().ends_with(';'); }
         if parent.kind() != "if_expression" { return false; }
         cur = parent;
     }
@@ -148,14 +146,7 @@ pub fn compact(src: &str, width: usize) -> String {
 /// Format `src` with rustfmt (stdin mode, sharing our width cap), then compact.
 fn fastfmt(src: &str, edition: &str, width: usize) -> Result<String, String> {
     let mut child = Command::new("rustfmt")
-        .args([
-            "--edition",
-            edition,
-            "--emit",
-            "stdout",
-            "--config",
-            &format!("max_width={width},use_small_heuristics=Max,disable_all_formatting=false"),
-        ])
+        .args(["--edition", edition, "--emit", "stdout", "--config", &format!("max_width={width},use_small_heuristics=Max,disable_all_formatting=false")])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -172,11 +163,7 @@ fn fastfmt(src: &str, edition: &str, width: usize) -> Result<String, String> {
 fn toml_lookup(path: &Path, file: &str, key: &str) -> Option<String> {
     for dir in path.canonicalize().unwrap_or_else(|_| path.to_path_buf()).ancestors() {
         if let Ok(t) = std::fs::read_to_string(dir.join(file)) {
-            return t
-                .lines()
-                .find(|l| l.trim_start().starts_with(key))
-                .and_then(|l| l.split('=').nth(1))
-                .map(|v| v.trim().trim_matches('"').to_string());
+            return t.lines().find(|l| l.trim_start().starts_with(key)).and_then(|l| l.split('=').nth(1)).map(|v| v.trim().trim_matches('"').to_string());
         }
     }
     None
@@ -320,28 +307,35 @@ mod tests {
     #[test]
     fn joins_house_shapes() {
         let cases = [
-            ("fn f(x: u8) -> u8 {\n    if x > 1 {\n        return 1;\n    }\n    0\n}\n",
-             "fn f(x: u8) -> u8 {\n    if x > 1 { return 1; }\n    0\n}\n"),
-            ("fn f(ready: bool) {\n    if ready {\n        notify();\n    }\n}\n",
-             "fn f(ready: bool) { if ready { notify(); } }\n"),
-            ("fn f(fds: Fds) {\n    for fd in fds {\n        let _ = self.poller.delete(borrowed(fd));\n    }\n}\n",
-             "fn f(fds: Fds) { for fd in fds { let _ = self.poller.delete(borrowed(fd)); } }\n"),
-            ("fn time(&self) -> f64 {\n    self.core.time()\n}\n",
-             "fn time(&self) -> f64 { self.core.time() }\n"),
-            ("fn f(c: bool, e: &mut E, h: H) {\n    if c {\n        e.writer = Some(h)\n    } else {\n        e.reader = Some(h)\n    }\n}\n",
-             "fn f(c: bool, e: &mut E, h: H) { if c { e.writer = Some(h) } else { e.reader = Some(h) } }\n"),
-            ("fn f(c: bool) {\n    if c {\n        a()\n    } else {\n        b()\n    }\n    done()\n}\n",
-             "fn f(c: bool) {\n    if c { a() }\n    else { b() }\n    done()\n}\n"),
-            ("struct FdEntry<H> {\n    reader: Option<H>,\n    writer: Option<H>,\n}\n",
-             "struct FdEntry<H> { reader: Option<H>, writer: Option<H> }\n"),
-            ("enum Rt {\n    Owned(Runtime),\n    Borrowed(Handle),\n}\n",
-             "enum Rt { Owned(Runtime), Borrowed(Handle) }\n"),
-            ("fn drain(&self, q: &mut Q) {\n    while let Some(h) = q.pop_front() {\n        ready.push_back(h)\n    }\n}\n",
-             "fn drain(&self, q: &mut Q) { while let Some(h) = q.pop_front() { ready.push_back(h) } }\n"),
-            ("impl<H> Default for FdEntry<H> {\n    fn default() -> Self {\n        Self { reader: None, writer: None }\n    }\n}\n",
-             "impl<H> Default for FdEntry<H> { fn default() -> Self { Self { reader: None, writer: None } } }\n"),
-            ("fn h(&self) -> Handle {\n    match self {\n        Rt::Owned(r) => r.handle().clone(),\n        Rt::Borrowed(h) => h.clone(),\n    }\n}\n",
-             "fn h(&self) -> Handle { match self { Rt::Owned(r) => r.handle().clone(), Rt::Borrowed(h) => h.clone() } }\n"),
+            ("fn f(x: u8) -> u8 {\n    if x > 1 {\n        return 1;\n    }\n    0\n}\n", "fn f(x: u8) -> u8 {\n    if x > 1 { return 1; }\n    0\n}\n"),
+            ("fn f(ready: bool) {\n    if ready {\n        notify();\n    }\n}\n", "fn f(ready: bool) { if ready { notify(); } }\n"),
+            (
+                "fn f(fds: Fds) {\n    for fd in fds {\n        let _ = self.poller.delete(borrowed(fd));\n    }\n}\n",
+                "fn f(fds: Fds) { for fd in fds { let _ = self.poller.delete(borrowed(fd)); } }\n",
+            ),
+            ("fn time(&self) -> f64 {\n    self.core.time()\n}\n", "fn time(&self) -> f64 { self.core.time() }\n"),
+            (
+                "fn f(c: bool, e: &mut E, h: H) {\n    if c {\n        e.writer = Some(h)\n    } else {\n        e.reader = Some(h)\n    }\n}\n",
+                "fn f(c: bool, e: &mut E, h: H) { if c { e.writer = Some(h) } else { e.reader = Some(h) } }\n",
+            ),
+            (
+                "fn f(c: bool) {\n    if c {\n        a()\n    } else {\n        b()\n    }\n    done()\n}\n",
+                "fn f(c: bool) {\n    if c { a() }\n    else { b() }\n    done()\n}\n",
+            ),
+            ("struct FdEntry<H> {\n    reader: Option<H>,\n    writer: Option<H>,\n}\n", "struct FdEntry<H> { reader: Option<H>, writer: Option<H> }\n"),
+            ("enum Rt {\n    Owned(Runtime),\n    Borrowed(Handle),\n}\n", "enum Rt { Owned(Runtime), Borrowed(Handle) }\n"),
+            (
+                "fn drain(&self, q: &mut Q) {\n    while let Some(h) = q.pop_front() {\n        ready.push_back(h)\n    }\n}\n",
+                "fn drain(&self, q: &mut Q) { while let Some(h) = q.pop_front() { ready.push_back(h) } }\n",
+            ),
+            (
+                "impl<H> Default for FdEntry<H> {\n    fn default() -> Self {\n        Self { reader: None, writer: None }\n    }\n}\n",
+                "impl<H> Default for FdEntry<H> { fn default() -> Self { Self { reader: None, writer: None } } }\n",
+            ),
+            (
+                "fn h(&self) -> Handle {\n    match self {\n        Rt::Owned(r) => r.handle().clone(),\n        Rt::Borrowed(h) => h.clone(),\n    }\n}\n",
+                "fn h(&self) -> Handle { match self { Rt::Owned(r) => r.handle().clone(), Rt::Borrowed(h) => h.clone() } }\n",
+            ),
         ];
         for (src, want) in cases { assert_eq!(compact(src, 150), want, "src: {src}") }
     }
@@ -349,11 +343,11 @@ mod tests {
     #[test]
     fn keeps_what_must_stay() {
         for src in [
-            "fn f() {\n    a();\n    b();\n}\n",                       // two statements in a fn body
-            "fn f(ready: bool) {\n    if ready {\n        notify();\n        return;\n    }\n}\n",  // neither an inner nor enclosing block may absorb two statements
-            "fn f(r: R) -> u8 {\n    match r {\n        Err(e) => {\n            log(e);\n            return 1;\n        }\n        Ok(v) => v,\n    }\n}\n",  // multi-statement arm: neither the match nor an enclosing block joins
-            "fn f() {\n    // why\n    a()\n}\n",                      // comment must survive
-            "fn f() {\n    let s = \"a\nb\";\n}\n",                    // multiline string literal
+            "fn f() {\n    a();\n    b();\n}\n",                                                   // two statements in a fn body
+            "fn f(ready: bool) {\n    if ready {\n        notify();\n        return;\n    }\n}\n", // neither an inner nor enclosing block may absorb two statements
+            "fn f(r: R) -> u8 {\n    match r {\n        Err(e) => {\n            log(e);\n            return 1;\n        }\n        Ok(v) => v,\n    }\n}\n", // multi-statement arm: neither the match nor an enclosing block joins
+            "fn f() {\n    // why\n    a()\n}\n",   // comment must survive
+            "fn f() {\n    let s = \"a\nb\";\n}\n", // multiline string literal
         ] { assert_eq!(compact(src, 150), src) }
         let long = format!("fn f() {{\n    {}()\n}}\n", "x".repeat(160));
         assert_eq!(compact(&long, 150), long); // width cap

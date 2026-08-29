@@ -25,7 +25,7 @@ cargo fastfmt --check    # exit 1 listing files that would change; write nothing
 cargo fastfmt src lib.rs # format specific files or directories
 ```
 
-`--width N` sets the rustfmt line cap (default 130). Joined one-liners use
+`--width N` sets the rustfmt line cap (default 160). Joined one-liners use
 tighter caps: 105 columns, or 80 for a two-statement block. rustfmt must be on
 PATH (`rustup component add rustfmt`).
 
