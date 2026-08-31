@@ -2,26 +2,9 @@
 
 ## Design
 
-Everything lives in `src/main.rs`. `fastfmt()` pipes a file through `rustfmt
---emit stdout` (width and `use_small_heuristics=Max` passed via `--config`, so
-the project's `disable_all_formatting` guard is overridden), then `compact()`
-re-joins. `guard_rustfmt()` creates or updates that guard before formatting.
-Joining is
-syntax-aware via tree-sitter: `join_limit` names the joinable node kinds and
-their item limits, `joined` renders a candidate onto one line (dropping a
-trailing comma, adding no space before `.`-led continuations), and
-`compact_round` applies innermost candidates first, iterating to a fixpoint so
-nested one-liners collapse. Anything containing a comment or a multi-line
-token never joins. Code blocks join only with one statement or expression, and
-semicolons are preserved exactly. After joining, statement-position `else`
-clauses move to their own line; value-position `if`/`else` expressions are
-unchanged.
+Everything lives in `src/main.rs`. `fastfmt()` pipes a file through `rustfmt --emit stdout` (width and `use_small_heuristics=Max` passed via `--config`, so the project's `disable_all_formatting` guard is overridden), then `compact()` re-joins. `guard_rustfmt()` creates or updates that guard before formatting. Joining is syntax-aware via tree-sitter: `join_limit` names the joinable node kinds and their item limits, `joined` renders a candidate onto one line (dropping a trailing comma, adding no space before `.`-led continuations), and `compact_round` applies innermost candidates first, iterating to a fixpoint so nested one-liners collapse. Anything containing a comment or a multi-line token never joins. Code blocks join only with one statement or expression, and semicolons are preserved exactly. After joining, statement-position `else` clauses move to their own line; value-position `if`/`else` expressions are unchanged.
 
-The tuning benchmark is AnswerDotAI/loopmini: run stable `cargo fmt` on its
-`src/`, then `cargo-fastfmt`, and diff against the original. The join caps
-(105, and 80 for two-statement blocks) come from that exercise; the remaining
-diff should be only rustfmt canonicalisations such as import order and
-trailing semicolons.
+The tuning benchmark is AnswerDotAI/loopmini: run stable `cargo fmt` on its `src/`, then `cargo-fastfmt`, and diff against the original. The join caps (105, and 80 for two-statement blocks) come from that exercise; the remaining diff should be only rustfmt canonicalisations such as import order and trailing semicolons.
 
 ## Commands
 
