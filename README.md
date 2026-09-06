@@ -2,15 +2,15 @@
 
 `cargo fmt`, then put the one-liners back.
 
-Stable rustfmt always breaks small constructs onto multiple lines: a single-expression fn body, a statement-position if/else, a short match or struct body. The options that would prevent this are nightly-only, and some shapes have no option at all. fastfmt runs rustfmt (via stdin, so no config file is needed), then re-joins those constructs when they are comment-free, small, and within a width cap, giving fastai-style compact Rust from a stable toolchain.
+Stable rustfmt expands constructs such as short function bodies, statement-position `if`/`else`, and short `match` or `struct` bodies. Some options for keeping them compact are nightly-only. Others have no rustfmt option. fastfmt runs rustfmt through stdin, then rejoins comment-free constructs within its size and width limits, giving fastai-style compact Rust from a stable toolchain.
 
-## Install
+## Install and use
 
 ```bash
 pip install fastfmt
 ```
 
-The wheel ships a single `cargo-fastfmt` binary and no Python code. With it on PATH, cargo picks it up as a subcommand:
+The wheel contains one `cargo-fastfmt` binary and no Python code. With the binary on `PATH`, Cargo recognizes it as a subcommand:
 
 ```bash
 cargo fastfmt            # format the current directory tree in place
@@ -18,10 +18,22 @@ cargo fastfmt --check    # exit 1 listing files that would change; write nothing
 cargo fastfmt src lib.rs # format specific files or directories
 ```
 
-`--width N` sets the rustfmt line cap (default 160). Joined one-liners use tighter caps: 105 columns, or 80 for a two-statement block. rustfmt must be on PATH (`rustup component add rustfmt`).
+rustfmt must also be on `PATH`. Install it with `rustup component add rustfmt`.
 
-On each normal run, fastfmt creates or updates the target project's `rustfmt.toml` with `disable_all_formatting = true`. This makes accidental `cargo fmt` and editor rustfmt runs harmless; fastfmt overrides the setting for its own rustfmt pass. In `--check` mode the config is never written, and a missing or disabled guard is reported as a required update.
+`--width N` sets the rustfmt line cap, which defaults to 160. Joined one-liners have tighter caps: 105 columns, or 80 for a two-statement block.
 
-## What gets joined
+On a normal run, fastfmt creates or updates the target project's `rustfmt.toml` with `disable_all_formatting = true`. This prevents `cargo fmt` or editor rustfmt runs from undoing the compact formatting. fastfmt overrides the setting for its own pass. No pre-existing config file is needed.
 
-A block joins onto one line only when nothing in it is a comment or spans multiple lines itself, and the result fits the cap: fn, if/else, and loop bodies with one statement or expression, match/struct/enum bodies with up to three arms, variants, or fields, and single-item impl blocks. Semicolons are preserved exactly. A statement-position `else` starts on a new line; an `if`/`else` used as a value stays on one line. Joins run innermost-first to a fixpoint, so nested one-liners collapse fully. Match arms stay expanded, and any block containing a comment or a multi-line string is left exactly as rustfmt wrote it.
+`--check` never writes the config. It reports a missing or disabled guard as a required update.
+
+## Joining rules
+
+A construct can join onto one line when it fits the width cap and contains no comments or multiline tokens. The supported constructs are:
+
+- `fn`, `if`/`else`, and loop bodies with one statement or expression.
+- `match`, `struct`, and `enum` bodies with up to three arms, fields, or variants.
+- Single-item `impl` blocks.
+
+Semicolons are preserved exactly. A statement-position `else` starts on a new line. An `if`/`else` used as a value stays on one line.
+
+Joins run innermost-first and repeat until nothing more can join. This allows nested constructs to collapse fully. Blocks used as match-arm bodies stay expanded. Blocks containing comments or multiline strings retain rustfmt's output.
