@@ -1,5 +1,5 @@
 "End-to-end check of the installed binary: rustfmt runs, then compaction joins."
-import subprocess
+import subprocess, pytest
 
 BROKEN ="""fn time() -> f64 {
     42.0
@@ -68,3 +68,33 @@ def test_fastfmt_binary(tmp_path):
     assert f.read_text() == BROKEN
     r = subprocess.run(['cargo-fastfmt', '--check'], cwd=tmp_path, capture_output=True, text=True)
     assert r.returncode == 1 and 'main.rs' in r.stdout
+
+
+@pytest.mark.parametrize('edition,source', [
+    ('edition.workspace = true', 'fn f(x: Option<u8>) { if let Some(x) = x && x > 0 { drop(x); } }'),
+    ('edition = { workspace = true }', 'fn f(x: Option<u8>) { if let Some(x) = x && x > 0 { drop(x); } }'),
+    ("edition = '2021' # member override", 'fn gen() {}'),
+    ('', 'fn async() {}'),  # Cargo defaults to 2015, not the workspace edition
+])
+def test_workspace_editions(tmp_path, edition, source):
+    (tmp_path/'Cargo.toml').write_text('[workspace]\nmembers = ["py"]\nresolver = "2"\n'
+        '[workspace.package]\nedition = "2024"\n')
+    member = tmp_path/'py'
+    (member/'src').mkdir(parents=True)
+    (member/'Cargo.toml').write_text('[package]\nname = "bindings"\nversion = "0.1.0"\n' + edition + '\n')
+    (member/'src/lib.rs').write_text(source + '\n')
+    subprocess.run(['cargo', 'fastfmt'], cwd=tmp_path, check=True)
+    subprocess.run(['cargo', 'fastfmt', '--check'], cwd=tmp_path, check=True)
+
+
+def test_standalone_file_in_virtual_workspace(tmp_path):
+    (tmp_path/'Cargo.toml').write_text('[workspace]\nmembers = ["member"]\nresolver = "2"\n')
+    src = tmp_path/'member/src'
+    src.mkdir(parents=True)
+    (src.parent/'Cargo.toml').write_text('[package]\nname = "member"\nversion = "0.1.0"\nedition = "2021"\n')
+    (src/'lib.rs').write_text('fn member() {}\n')
+    script = tmp_path/'script.rs'
+    script.write_text('async fn main() {\n    work().await;\n}\n')
+    subprocess.run(['cargo-fastfmt'], cwd=tmp_path, check=True)
+    assert script.read_text() == 'async fn main() { work().await; }\n'
+    subprocess.run(['cargo-fastfmt', '--check'], cwd=tmp_path, check=True)

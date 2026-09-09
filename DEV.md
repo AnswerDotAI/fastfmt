@@ -8,6 +8,11 @@ The tuning benchmark is AnswerDotAI/loopmini: run stable `cargo fmt` on its `src
 
 ## Commands
 
+Edition lookup uses offline `cargo metadata --no-deps`, caching the resolved
+editions for all workspace packages. This respects workspace inheritance, member
+overrides, and Cargo's default edition without reimplementing manifest parsing.
+Standalone Rust files outside a Cargo package, including files under a virtual workspace root, retain the 2021 fallback.
+
 ```bash
 maturin develop && pytest -q
 ship-rs-build
