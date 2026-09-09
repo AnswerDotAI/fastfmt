@@ -5,6 +5,7 @@
 //! width cap, and small (code blocks: 1 expression, fn/impl: 1 item,
 //! comma-separated bodies: 3 items). Joins run innermost-first to a fixpoint, so
 //! nested one-liners collapse fully.
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -158,8 +159,7 @@ fn fastfmt(src: &str, edition: &str, width: usize) -> Result<String, String> {
     Ok(compact(&String::from_utf8_lossy(&out.stdout), width))
 }
 
-/// The value at `key` in the nearest `file` at or above `path`, e.g. the edition
-/// from Cargo.toml or max_width from rustfmt.toml.
+/// The value at `key` in the nearest config file at or above `path`.
 fn toml_lookup(path: &Path, file: &str, key: &str) -> Option<String> {
     for dir in path.canonicalize().unwrap_or_else(|_| path.to_path_buf()).ancestors() {
         if let Ok(t) = std::fs::read_to_string(dir.join(file)) {
@@ -169,7 +169,30 @@ fn toml_lookup(path: &Path, file: &str, key: &str) -> Option<String> {
     None
 }
 
-fn edition_for(path: &Path) -> String { toml_lookup(path, "Cargo.toml", "edition").unwrap_or_else(|| "2021".into()) }
+/// Let Cargo resolve editions, including workspace inheritance and its 2015 default.
+/// Cache every package from the response so a workspace only needs one lookup.
+fn edition_for(path: &Path, editions: &mut HashMap<PathBuf, String>) -> Result<String, String> {
+    let path = path.canonicalize().map_err(|e| e.to_string())?;
+    let Some(dir) = path.ancestors().find(|p| p.join("Cargo.toml").is_file()) else { return Ok("2021".into()) };
+    let manifest = dir.join("Cargo.toml");
+    if let Some(edition) = editions.get(&manifest) { return Ok(edition.clone()); }
+    let out = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--offline", "--format-version", "1", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .map_err(|e| format!("failed to run cargo metadata: {e}"))?;
+    if !out.status.success() { return Err(String::from_utf8_lossy(&out.stderr).into_owned()); }
+    let metadata: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("invalid cargo metadata: {e}"))?;
+    let packages = metadata["packages"].as_array().ok_or("cargo metadata has no packages")?;
+    for package in packages {
+        let manifest = package["manifest_path"].as_str().ok_or("cargo package has no manifest_path")?;
+        let edition = package["edition"].as_str().ok_or("cargo package has no edition")?;
+        let manifest = Path::new(manifest).canonicalize().map_err(|e| e.to_string())?;
+        editions.insert(manifest, edition.into());
+    }
+    // A virtual workspace manifest owns no package: this is a standalone file.
+    Ok(editions.get(&manifest).cloned().unwrap_or_else(|| "2021".into()))
+}
 
 /// `--width` beats the nearest rustfmt.toml's max_width, which beats the default.
 fn width_for(path: &Path, flag: Option<usize>) -> usize {
@@ -263,6 +286,7 @@ fn main() {
     for p in &paths { rs_files(p, &mut files) }
     files.sort();
     let mut dirty = vec![];
+    let mut editions = HashMap::new();
     for f in &files {
         let src = match std::fs::read_to_string(f) {
             Ok(s) => s,
@@ -271,7 +295,7 @@ fn main() {
                 std::process::exit(2)
             }
         };
-        match fastfmt(&src, &edition_for(f), width_for(f, width_flag)) {
+        match edition_for(f, &mut editions).and_then(|edition| fastfmt(&src, &edition, width_for(f, width_flag))) {
             Ok(new) if new != src => {
                 if check { dirty.push(f) } else if let Err(e) = std::fs::write(f, &new) {
                     eprintln!("{}: {e}", f.display());
