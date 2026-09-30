@@ -20,7 +20,7 @@ cargo fastfmt src lib.rs # format specific files or directories
 
 rustfmt must also be on `PATH`. Install it with `rustup component add rustfmt`.
 
-`--width N` sets the rustfmt line cap, which defaults to 160. Joined one-liners have tighter caps: 105 columns, or 80 for a two-statement block.
+`--width N` sets the line cap for rustfmt and joined one-liners, which defaults to 160.
 
 On a normal run, fastfmt creates or updates the target project's `rustfmt.toml` with `disable_all_formatting = true`. This prevents `cargo fmt` or editor rustfmt runs from undoing the compact formatting. fastfmt overrides the setting for its own pass. No pre-existing config file is needed.
 
@@ -30,7 +30,7 @@ On a normal run, fastfmt creates or updates the target project's `rustfmt.toml` 
 
 A construct can join onto one line when it fits the width cap and contains no comments or multiline tokens. The supported constructs are:
 
-- `fn`, `if`/`else`, and loop bodies with one statement or expression.
+- Ordinary blocks, including function, closure, `if`/`else`, and loop bodies, with at most one statement, optionally followed by a tail expression.
 - `match`, `struct`, and `enum` bodies with up to three arms, fields, or variants.
 - Single-item `impl` blocks.
 

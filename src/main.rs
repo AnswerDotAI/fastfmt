@@ -2,7 +2,7 @@
 //! one line. rustfmt (stable) always breaks fn bodies, statement if/else, loop
 //! bodies, and short match/struct/enum/impl bodies onto multiple lines; the
 //! compaction pass joins any such block back when it is comment-free, within the
-//! width cap, and small (code blocks: 1 expression, fn/impl: 1 item,
+//! width cap, and small (code blocks: 1 statement plus a tail expression, impl: 1 item,
 //! comma-separated bodies: 3 items). Joins run innermost-first to a fixpoint, so
 //! nested one-liners collapse fully.
 use std::collections::HashMap;
@@ -19,12 +19,21 @@ fn parser() -> Parser {
     p
 }
 
-/// Statement/item count limit for a joinable body, or None when `kind` never joins.
+/// Whether a final block child is an expression rather than a terminated statement or item.
+fn is_tail_expression(mut node: Node) -> bool {
+    if node.kind() == "expression_statement" {
+        if node.child(node.child_count() - 1).is_some_and(|n| n.kind() == ";") { return false; }
+        node = node.named_child(0).unwrap();
+    }
+    let language = node.language();
+    ["_expression", "_literal"].iter().any(|kind| language.subtypes_for_supertype(language.id_for_node_kind(kind, true)).contains(&node.kind_id()))
+}
+
+/// Child count limit for a joinable body, or None when `kind` never joins.
 fn join_limit(node: &Node) -> Option<usize> {
     match node.kind() {
-        "block" if node.parent().is_some_and(|p| p.kind() == "function_item") => Some(1),
         "block" if node.parent().is_some_and(|p| p.kind() == "match_arm") => None, // arms stay expanded
-        "block" => Some(1),
+        "block" => Some(if node.named_child(1).is_some_and(is_tail_expression) { 2 } else { 1 }),
         "match_block" | "field_declaration_list" | "enum_variant_list" => Some(3),
         "declaration_list" => Some(1),
         _ => None,
@@ -297,10 +306,7 @@ fn main() {
         };
         match edition_for(f, &mut editions).and_then(|edition| fastfmt(&src, &edition, width_for(f, width_flag))) {
             Ok(new) if new != src => {
-                if check { dirty.push(f) } else if let Err(e) = std::fs::write(f, &new) {
-                    eprintln!("{}: {e}", f.display());
-                    std::process::exit(2)
-                }
+                if check { dirty.push(f) } else if let Err(e) = std::fs::write(f, &new) { eprintln!("{}: {e}", f.display()); std::process::exit(2) }
             }
             Ok(_) => {}
             Err(e) => {
@@ -318,7 +324,19 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{compact, guarded_config};
+    use super::{compact, fastfmt, guarded_config};
+
+    #[test]
+    fn joins_statement_with_tail() {
+        for body in ["x = step(x);\nSome(x)", "let y = compute(x);\ny.finish()", "a();\n42", "a();\nif c { b() } else { d() }"] {
+            let src = format!("fn f() {{\n{body}\n}}\n");
+            assert_eq!(compact(&src, 150), format!("fn f() {{ {} }}\n", body.replace('\n', " ")));
+        }
+        let src = "fn f() { before(); let steps = |mut x: f64, step: fn(f64) -> f64| std::iter::from_fn(move || { x = step(x); Some(x) }).take(64); }\n";
+        let out = fastfmt(src, "2021", 160).unwrap();
+        assert!(out.contains("std::iter::from_fn(move || { x = step(x); Some(x) }).take(64)"), "{out}");
+        assert_eq!(fastfmt(&out, "2021", 160).unwrap(), out);
+    }
 
     #[test]
     fn guards_rustfmt_config() {
@@ -331,7 +349,7 @@ mod tests {
     #[test]
     fn joins_house_shapes() {
         let cases = [
-            ("fn f(x: u8) -> u8 {\n    if x > 1 {\n        return 1;\n    }\n    0\n}\n", "fn f(x: u8) -> u8 {\n    if x > 1 { return 1; }\n    0\n}\n"),
+            ("fn f(x: u8) -> u8 {\n    if x > 1 {\n        return 1;\n    }\n    0\n}\n", "fn f(x: u8) -> u8 { if x > 1 { return 1; } 0 }\n"),
             ("fn f(ready: bool) {\n    if ready {\n        notify();\n    }\n}\n", "fn f(ready: bool) { if ready { notify(); } }\n"),
             (
                 "fn f(fds: Fds) {\n    for fd in fds {\n        let _ = self.poller.delete(borrowed(fd));\n    }\n}\n",
@@ -343,8 +361,8 @@ mod tests {
                 "fn f(c: bool, e: &mut E, h: H) { if c { e.writer = Some(h) } else { e.reader = Some(h) } }\n",
             ),
             (
-                "fn f(c: bool) {\n    if c {\n        a()\n    } else {\n        b()\n    }\n    done()\n}\n",
-                "fn f(c: bool) {\n    if c { a() }\n    else { b() }\n    done()\n}\n",
+                "fn f(c: bool) {\n    if c {\n        a()\n    } else {\n        b()\n    }\n    done();\n}\n",
+                "fn f(c: bool) {\n    if c { a() }\n    else { b() }\n    done();\n}\n",
             ),
             ("struct FdEntry<H> {\n    reader: Option<H>,\n    writer: Option<H>,\n}\n", "struct FdEntry<H> { reader: Option<H>, writer: Option<H> }\n"),
             ("enum Rt {\n    Owned(Runtime),\n    Borrowed(Handle),\n}\n", "enum Rt { Owned(Runtime), Borrowed(Handle) }\n"),
@@ -367,6 +385,8 @@ mod tests {
     #[test]
     fn keeps_what_must_stay() {
         for src in [
+            "fn f() {\n    a();\n    b();\n    c()\n}\n",                                          // two statements plus a tail
+            "fn f() {\n    a();\n    fn g() {}\n}\n",                                              // an item is not a tail expression
             "fn f() {\n    a();\n    b();\n}\n",                                                   // two statements in a fn body
             "fn f(ready: bool) {\n    if ready {\n        notify();\n        return;\n    }\n}\n", // neither an inner nor enclosing block may absorb two statements
             "fn f(r: R) -> u8 {\n    match r {\n        Err(e) => {\n            log(e);\n            return 1;\n        }\n        Ok(v) => v,\n    }\n}\n", // multi-statement arm: neither the match nor an enclosing block joins
