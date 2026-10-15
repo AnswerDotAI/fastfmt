@@ -98,3 +98,35 @@ def test_standalone_file_in_virtual_workspace(tmp_path):
     subprocess.run(['cargo-fastfmt'], cwd=tmp_path, check=True)
     assert script.read_text() == 'async fn main() { work().await; }\n'
     subprocess.run(['cargo-fastfmt', '--check'], cwd=tmp_path, check=True)
+
+
+@pytest.mark.parametrize('workspace,package,enabled', [
+    ('', '', False),
+    ('', 'join_comments = true', True),
+    ('join_comments = true', '', True),
+    ('join_comments = true', 'join_comments = false', False),
+    ('', 'join_comments = "yes"', None),
+])
+def test_comment_settings(tmp_path, workspace, package, enabled):
+    (tmp_path/'Cargo.toml').write_text('[workspace]\nmembers = ["member"]\nresolver = "2"\n'
+        '[workspace.metadata.fastfmt]\n' + workspace + '\n')
+    src = tmp_path/'member/src'
+    src.mkdir(parents=True)
+    (src.parent/'Cargo.toml').write_text('[package]\nname = "member"\nversion = "0.1.0"\nedition = "2021"\n'
+        '[package.metadata.fastfmt]\n' + package + '\n')
+    f = src/'lib.rs'
+    source = ('/// A wrapped paragraph\n/// continues here.\n///\n/// - First item\n/// - Second item\n'
+        '///\n/// ```rust\n/// let x = 1;\n/// let y = 2;\n/// ```\n///\n/// Heading\n/// =======\n'
+        '///\n/// First line  \n/// second line\\\n/// third line\nfn f() {}\n')
+    f.write_text(source)
+    r = subprocess.run(['cargo-fastfmt'], cwd=tmp_path, capture_output=True, text=True)
+    if enabled is None:
+        assert r.returncode == 2 and 'join_comments must be a boolean' in r.stderr
+        assert f.read_text() == source
+        return
+    assert r.returncode == 0, r.stderr
+    expected = source.replace('paragraph\n/// continues', 'paragraph continues') if enabled else source
+    assert f.read_text() == expected
+    assert subprocess.run(['cargo-fastfmt', '--check'], cwd=tmp_path).returncode == 0
+    f.write_text(source)
+    assert subprocess.run(['cargo-fastfmt', '--check'], cwd=tmp_path).returncode == int(enabled)

@@ -26,6 +26,21 @@ On a normal run, fastfmt creates or updates the target project's `rustfmt.toml` 
 
 `--check` never writes the config. It reports a missing or disabled guard as a required update.
 
+## Comment joining
+
+Opt in to joining hard-wrapped comment paragraphs in `Cargo.toml`:
+
+```toml
+[package.metadata.fastfmt]
+join_comments = true
+```
+
+Use `[workspace.metadata.fastfmt]` for workspace-wide defaults. Package settings override the workspace setting, including `join_comments = false`. Comment joining is off when neither sets it.
+
+Consecutive standalone `//`, `///`, or `//!` comments with matching indentation and markers are treated as Markdown. Soft paragraph breaks become spaces, including wrapped continuations within list items and block quotes. Paragraphs can exceed `--width`; fastfmt does not rewrap them.
+
+Lists, code blocks, tables, headings, inline code, raw HTML, and explicit Markdown hard breaks (a trailing backslash or two spaces) retain their structure. Use lists for separate points and code fences for diagrams, disabled code, or other layout-sensitive text. Unmarked line breaks within prose are joined. Trailing comments and block comments are not joined.
+
 ## Joining rules
 
 A construct can join onto one line when it fits the width cap and contains no comments or multiline tokens. The supported constructs are:

@@ -8,10 +8,10 @@ The tuning benchmark is AnswerDotAI/loopmini: run stable `cargo fmt` on its `src
 
 ## Commands
 
-Edition lookup uses offline `cargo metadata --no-deps`, caching the resolved
-editions for all workspace packages. This respects workspace inheritance, member
-overrides, and Cargo's default edition without reimplementing manifest parsing.
+Edition and comment-setting lookup uses offline `cargo metadata --no-deps`, caching the resolved editions and settings for all workspace packages. This respects workspace inheritance, member overrides, and Cargo's default edition without reimplementing manifest parsing. `package.metadata.fastfmt.join_comments` overrides `workspace.metadata.fastfmt.join_comments`, defaulting to false. Invalid non-boolean values are errors.
 Standalone Rust files outside a Cargo package, including files under a virtual workspace root, retain the 2021 fallback.
+
+When enabled, `join_comment_lines()` runs after code compaction. Tree-sitter finds standalone line comments; consecutive comments with identical indentation and markers form a Markdown document. pulldown-cmark identifies soft breaks, which map back to source edits removing only the break, comment prefix, and Markdown continuation prefix. Other source text is not serialized or normalized. The code-width limit does not apply to comment paragraphs.
 
 ```bash
 maturin develop && pytest -q
