@@ -377,9 +377,10 @@ fn join_comment_lines(src: &str) -> String {
 
 /// Format `src` with rustfmt (stdin mode, sharing our width cap), then compact.
 fn fastfmt(src: &str, edition: &str, width: usize, join_comments: bool) -> Result<String, String> {
-    let mut child = Command::new("rustfmt")
-        .args(["--edition", edition, "--emit", "stdout", "--config", &format!("max_width={width},use_small_heuristics=Max,disable_all_formatting=false")])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("failed to run rustfmt: {e}"))?;
+    let mut child = Command::new("rustfmt").args([
+        "--edition", edition, "--emit", "stdout", "--config",
+        &format!("max_width={width},use_small_heuristics=Max,use_field_init_shorthand=true,disable_all_formatting=false"),
+    ]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("failed to run rustfmt: {e}"))?;
     child.stdin.take().unwrap().write_all(src.as_bytes()).map_err(|e| e.to_string())?;
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
     if !out.status.success() { return Err(String::from_utf8_lossy(&out.stderr).into_owned()); }
@@ -458,11 +459,14 @@ fn guarded_config(src: &str) -> String {
     out
 }
 
-/// The guard config for `file`: `rustfmt.toml` in its package directory, or beside it outside a package.
+/// The `rustfmt.toml` that rustfmt reads for `file`'s package, searching up to the repository root, or a new one in the package directory.
 fn config_path(file: &Path) -> PathBuf {
     let dir = file.parent().unwrap();
     let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    package_dir(&dir).unwrap_or(&dir).join("rustfmt.toml")
+    let package = package_dir(&dir).unwrap_or(&dir);
+    let repo = package.ancestors().find(|p| p.join(".git").exists()).unwrap_or(package);
+    let mut configs = package.ancestors().take_while(|p| p.starts_with(repo)).map(|p| p.join("rustfmt.toml"));
+    configs.find(|p| p.is_file()).unwrap_or_else(|| package.join("rustfmt.toml"))
 }
 
 /// Ensure ordinary rustfmt is disabled for each target project. Returns paths which needed an update; in check mode they are reported but left untouched.
