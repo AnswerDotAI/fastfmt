@@ -86,13 +86,18 @@ def test_workspace_editions(tmp_path):
     subprocess.run(['cargo', 'fastfmt', '--check'], cwd=tmp_path, check=True)
 
 
-def test_standalone_file_in_virtual_workspace(tmp_path):
+def test_virtual_workspace(tmp_path):
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
     workspace(tmp_path, ['member'])
+    (tmp_path/'rustfmt.toml').write_text('max_width = 120\n')
     package(tmp_path/'member', 'fn member() {}\n')
     script = tmp_path/'script.rs'
     script.write_text('async fn main() {\n    work().await;\n}\n')
     formats_clean(tmp_path)
     assert script.read_text() == 'async fn main() { work().await; }\n'
+    # rustfmt reads the root config for the member as well.
+    assert (tmp_path/'rustfmt.toml').read_text() == 'max_width = 120\ndisable_all_formatting = true\n'
+    assert not (tmp_path/'member/rustfmt.toml').exists()
 
 
 @pytest.mark.parametrize('ws_setting,pkg_setting,enabled', [

@@ -24,7 +24,9 @@ Traversal respects `.gitignore`, `.git/info/exclude`, global Git ignores, and `.
 
 `--width N` sets the hard line cap, defaulting to 160. Signatures, imports, lists and expression continuations pack up to that cap. Each joined body must also fit a budget of `min(120, N)` by itself, not counting the signature or condition before it. A closure body joins only when its enclosing call or chain also fits that budget.
 
-On a normal run, fastfmt creates or updates each formatted project's `rustfmt.toml` with `disable_all_formatting = true`, unless that config is ignored. This prevents `cargo fmt` or editor rustfmt runs from undoing the compact formatting. fastfmt overrides the setting for its own pass. No pre-existing config file is needed.
+fastfmt runs rustfmt with `use_small_heuristics = "Max"` and `use_field_init_shorthand = true`, which writes `Foo { x: x }` as `Foo { x }`. These settings override the project's `rustfmt.toml`.
+
+On a normal run, fastfmt adds `disable_all_formatting = true` to the `rustfmt.toml` that rustfmt reads for each formatted package: the nearest one from the package directory up to the repository root. If there is none, fastfmt creates one in the package directory. This prevents `cargo fmt` or editor rustfmt runs from undoing the compact formatting. fastfmt overrides the setting for its own pass. No pre-existing config file is needed.
 
 `--check` never writes the config. It reports a missing or disabled guard as a required update.
 
