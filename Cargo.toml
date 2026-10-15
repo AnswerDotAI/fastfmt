@@ -13,10 +13,14 @@ path = "src/main.rs"
 join_comments = true
 
 [dependencies]
+ignore = "0.4.33"
 pulldown-cmark = { version = "0.13", default-features = false }
 serde_json = "1.0.151"
 tree-sitter = "0.25.10"
 tree-sitter-rust = "0.24.2"
+
+[profile.dev]
+opt-level = 2
 
 [profile.release]
 lto = false

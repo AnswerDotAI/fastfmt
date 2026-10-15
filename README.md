@@ -20,9 +20,11 @@ cargo fastfmt src lib.rs # format specific files or directories
 
 rustfmt must also be on `PATH`. Install it with `rustup component add rustfmt`.
 
-`--width N` sets the line cap for rustfmt and joined one-liners, which defaults to 160.
+Traversal respects `.gitignore`, `.git/info/exclude`, global Git ignores, and `.ignore` files, including for explicitly supplied paths. Hidden entries and `target/` directories are skipped. Ignored files, including `rustfmt.toml`, are never written.
 
-On a normal run, fastfmt creates or updates the target project's `rustfmt.toml` with `disable_all_formatting = true`. This prevents `cargo fmt` or editor rustfmt runs from undoing the compact formatting. fastfmt overrides the setting for its own pass. No pre-existing config file is needed.
+`--width N` sets the hard line cap, defaulting to 160. Signatures, imports, lists and expression continuations pack up to that cap. Each joined body must also fit a budget of `min(120, N)` by itself, not counting the signature or condition before it. A closure body joins only when its enclosing call or chain also fits that budget.
+
+On a normal run, fastfmt creates or updates each formatted project's `rustfmt.toml` with `disable_all_formatting = true`, unless that config is ignored. This prevents `cargo fmt` or editor rustfmt runs from undoing the compact formatting. fastfmt overrides the setting for its own pass. No pre-existing config file is needed.
 
 `--check` never writes the config. It reports a missing or disabled guard as a required update.
 
@@ -43,12 +45,16 @@ Lists, code blocks, tables, headings, inline code, raw HTML, and explicit Markdo
 
 ## Joining rules
 
-A construct can join onto one line when it fits the width cap and contains no comments or multiline tokens. The supported constructs are:
+A construct can join onto one line when it fits its budget and contains no comments or multiline tokens. The supported constructs are:
 
-- Ordinary blocks, including function, closure, `if`/`else`, and loop bodies, with at most one statement, optionally followed by a tail expression.
-- `match`, `struct`, and `enum` bodies with up to three arms, fields, or variants.
+- Blocks, including function, closure, `if`/`else`, loop and match-arm bodies, with at most one statement, optionally followed by a tail expression or by `break`, `continue` or `return`. A block whose first statement is an `if`/`else` chain doesn't join.
 - Single-item `impl` blocks.
+- Struct fields, enum variants, simple match arms, nested `use` declarations and other comma-separated lists, limited by width rather than item count.
 
-Semicolons are preserved exactly. A statement-position `else` starts on a new line. An `if`/`else` used as a value stays on one line.
+Semicolons are preserved exactly. Statement chains and multiline/over-width value chains separate `else if` and compact `else` branches after compact bodies. Multiline branch braces keep `} else {` attached. Value chains that fit entirely on one line stay inline.
 
-Joins run innermost-first and repeat until nothing more can join. This allows nested constructs to collapse fully. Blocks used as match-arm bodies stay expanded. Blocks containing comments or multiline strings retain rustfmt's output.
+Continuation packing erases existing breaks within expressions, parameter/argument lists and declaration headers while they fit the hard line cap. Multiline bodies and lists remain separate islands, with list interiors packed independently. This keeps meaningful closure bodies readable without expanding every method or enclosing parenthesis. The packer never invents breakpoints or splits tokens.
+
+Inside opaque macro token trees, only tiny `=> { ... }` groups with at most one direct semicolon and no nested token groups join, and their tokens are never rewritten. Parenthesised and bracketed macro groups that contain commas pack their existing interior lines without changing tokens. Brace-delimited macro groups never pack.
+
+Joins repeat so nested constructs can collapse fully. Comments and multiline strings are protected boundaries; packing is skipped when it would require altering their contents or indentation.
