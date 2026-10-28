@@ -78,7 +78,7 @@ fn shape(node: Node) -> Option<Shape> {
         "token_tree" if simple_macro_body(node) => Some(Shape::Body),
         "token_tree" => (node.child(0).is_some_and(|n| n.kind() != "{") && node.children(&mut node.walk()).any(|n| n.kind() == ",")).then_some(Shape::List),
         "field_declaration_list" | "use_list" | "array_expression" | "enum_variant_list" | "match_block" => Some(Shape::List),
-        "function_item" | "impl_item" | "struct_item" | "use_declaration" | "parameters" | "arguments" => Some(Shape::Run),
+        "function_item" | "function_signature_item" | "impl_item" | "struct_item" | "use_declaration" | "parameters" | "arguments" => Some(Shape::Run),
         _ => is_tail_expression(node).then_some(Shape::Run)
     }
 }
@@ -716,6 +716,12 @@ mod tests {
         let src = r#"struct Cell<'a> { layout: &'a MatrixLoop, pointers: &'a [usize], outer: &'a [npy_intp], core: &'a [npy_intp], dims: &'a [usize], i: usize }
 enum Kind { E, R, C, I }
 enum Tall<'a, T> { Q, #[cfg(native)] R, Project(&'a [T], usize) }
+trait Cells {
+    type Shared;
+    type Per;
+    type Cell<'a> where Self: 'a;
+    unsafe fn cell<'a>(shared: &'a Self::Shared, per: Self::Per, i: usize) -> Self::Cell<'a> where Self: 'a;
+}
 fn entry<E: Item>(f: Ufunc, kinds: &[Kind]) -> Loop { (Some(f), kinds.iter().map(|k| (match k { Kind::E => E::CODE, Kind::R => E::Real::CODE, Kind::C => E::Complex::CODE, Kind::I => i64::CODE }) as c_char).collect()) }
 impl<E: Item> Gufunc<E> for Permanent where E::W: NumAssignRef {
     type S = ();
@@ -744,6 +750,7 @@ fn f() {
         assert!(out.contains(src.lines().next().unwrap()), "{out}");
         assert!(out.contains("enum Kind { E, R, C, I }"), "{out}");
         assert!(out.contains("enum Tall<'a, T> { Q, #[cfg(native)] R, Project(&'a [T], usize) }"), "{out}");
+        assert!(out.contains("    unsafe fn cell<'a>(shared: &'a Self::Shared, per: Self::Per, i: usize) -> Self::Cell<'a> where Self: 'a;"), "{out}");
         assert!(out.contains("match k { Kind::E => E::CODE, Kind::R => E::Real::CODE, Kind::C => E::Complex::CODE, Kind::I => i64::CODE }"), "{out}");
         assert!(out.contains("}).collect())"), "{out}");
         assert!(out.contains("impl<E: Item> Gufunc<E> for Permanent where E::W: NumAssignRef {"), "{out}");
