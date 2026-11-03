@@ -1,12 +1,14 @@
 //! fastfmt: rustfmt followed by syntax-aware small-body joining and continuation packing. Meaningful multiline bodies and protected text remain boundaries; accepted edits remove existing breaks until no further compaction is possible.
 use ignore::WalkBuilder;
 use pulldown_cmark::{Event, Options, Tag, TagEnd};
+use serde_json::Value;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::io::Write;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::{env, fs};
 use tree_sitter::{Node, Parser, Tree};
 
 const DEFAULT_WIDTH: usize = 160; // when neither --width nor a rustfmt.toml max_width applies
@@ -31,6 +33,306 @@ fn apply(src: &str, mut edits: Vec<(Range<usize>, String)>) -> String {
     let mut out = src.to_string();
     for (range, text) in edits { out.replace_range(range, &text) }
     out
+}
+
+/// The segments of a plain path, excluding whitespace and comments. Generic/qualified types are not plain paths.
+fn path_text(node: Node, src: &str) -> Option<String> {
+    match node.kind() {
+        "scoped_identifier" | "scoped_type_identifier" => {
+            let prefix = match node.child_by_field_name("path") { Some(p) => path_text(p, src)?, None => String::new() };
+            Some(format!("{prefix}::{}", path_text(node.child_by_field_name("name")?, src)?))
+        }
+        "identifier" | "type_identifier" | "crate" | "self" | "super" => Some(src[node.byte_range()].to_string()),
+        _ => None,
+    }
+}
+
+/// A mergeable import's header/prefix and members, retaining aliases and nested groups without serializing them.
+fn import_parts(node: Node, src: &str) -> Option<(String, String)> {
+    if node.kind() != "use_declaration" || src[node.byte_range()].contains('/') { return None; }
+    let mut previous = node.prev_named_sibling();
+    while let Some(n) = previous {
+        if n.kind() == "attribute_item" || n.child_by_field_name("outer").is_some() { return None; }
+        if !n.kind().contains("comment") { break; }
+        previous = n.prev_named_sibling();
+    }
+    if node.next_named_sibling().is_some_and(|n| n.kind().contains("comment") && n.start_position().row == node.end_position().row) { return None; }
+    let argument = node.child_by_field_name("argument")?;
+    let path = if argument.kind() == "use_as_clause" { argument.child_by_field_name("path")? } else { argument };
+    let (prefix, members) = match path.kind() {
+        "scoped_identifier" => {
+            let prefix = match path.child_by_field_name("path") { Some(p) => path_text(p, src)?, None => String::new() };
+            let name = path.child_by_field_name("name")?;
+            (prefix, src[name.start_byte()..argument.end_byte()].to_string())
+        }
+        "scoped_use_list" => {
+            let prefix = match path.child_by_field_name("path") { Some(p) => path_text(p, src)?, None => String::new() };
+            let list = path.child_by_field_name("list")?;
+            (prefix, src[list.start_byte() + 1..list.end_byte() - 1].trim().trim_end_matches(',').trim_end().to_string())
+        }
+        "use_wildcard" => (path_text(path.named_child(0)?, src)?, "*".to_string()),
+        _ => return None,
+    };
+    if members.is_empty() { return None; }
+    Some((format!("{}{prefix}::", &src[node.start_byte()..argument.start_byte()]), members))
+}
+
+/// Merge adjacent imports with identical prefixes/visibility. Every accepted edit removes at least one use declaration.
+fn merge_imports(src: &str) -> String {
+    let tree = parse(src);
+    let mut imports = vec![];
+    walk(tree.root_node(), |n| {
+        if matches!(n.kind(), "macro_definition" | "token_tree" | "attribute_item" | "inner_attribute_item") { return false; }
+        if n.kind() == "use_declaration" { imports.push(n); return false; }
+        true
+    });
+    imports.sort_by_key(Node::start_byte);
+    let mut edits = vec![];
+    let mut i = 0;
+    while i < imports.len() {
+        let first = imports[i];
+        i += 1;
+        let Some((prefix, mut members)) = import_parts(first, src) else { continue };
+        let mut last = first;
+        while i < imports.len() {
+            let next = imports[i];
+            let gap = &src[last.end_byte()..next.start_byte()];
+            if !gap.trim().is_empty() || gap.matches('\n').count() > 1 { break; }
+            let Some((other_prefix, other_members)) = import_parts(next, src) else { break };
+            if other_prefix != prefix { break; }
+            members.push_str(&format!(", {other_members}"));
+            last = next;
+            i += 1;
+        }
+        if last != first { edits.push((first.start_byte()..last.end_byte(), format!("{prefix}{{{members}}};"))); }
+    }
+    apply(src, edits)
+}
+
+struct Import { path: String, name: String }
+
+/// A newline-separated list of qualified paths. Short-name conflicts depend on where the paths are used.
+fn import_paths(src: &str) -> Result<Vec<Import>, String> {
+    let mut imports: Vec<Import> = vec![];
+    for (line, path) in src.lines().enumerate().filter(|(_, p)| !p.trim().is_empty()) {
+        let text = format!("use {};", path.trim());
+        let tree = parse(&text);
+        let argument = tree.root_node().named_child(0).and_then(|n| n.child_by_field_name("argument"));
+        let path = argument.filter(|n| {
+            n.kind() == "scoped_identifier" && n.child_by_field_name("name").is_some_and(|n| n.kind() == "identifier") && !text[n.byte_range()].contains('/')
+        }).and_then(|n| path_text(n, &text)).filter(|_| !tree.root_node().has_error() && tree.root_node().named_child_count() == 1)
+            .ok_or_else(|| format!("{}: expected a qualified path", line + 1))?;
+        let name = path.rsplit("::").next().unwrap().trim_start_matches("r#").to_string();
+        if imports.iter().any(|i| i.path == path) { continue; }
+        imports.push(Import { path, name });
+    }
+    Ok(imports)
+}
+
+/// Flatten explicit imports, including groups, aliases and `self`; glob imports deliberately remain unresolved.
+fn use_bindings<'a>(node: Node<'a>, prefix: &str, src: &str, out: &mut Vec<(String, String, Node<'a>)>) {
+    let qualify = |path: &str| if prefix.is_empty() || prefix == "::" { format!("{prefix}{path}") } else { format!("{prefix}::{path}") };
+    match node.kind() {
+        "use_list" => { for child in node.named_children(&mut node.walk()) { use_bindings(child, prefix, src, out); } }
+        "scoped_use_list" => {
+            let path = node.child_by_field_name("path").and_then(|n| path_text(n, src)).unwrap_or_default();
+            let prefix = if path.is_empty() { "::".to_string() } else { qualify(&path) };
+            use_bindings(node.child_by_field_name("list").unwrap(), &prefix, src, out);
+        }
+        "use_as_clause" => {
+            let path = node.child_by_field_name("path").and_then(|n| path_text(n, src)).unwrap();
+            let alias = node.child_by_field_name("alias").unwrap();
+            let path = if path == "self" { prefix.to_string() } else { qualify(&path) };
+            out.push((src[alias.byte_range()].trim_start_matches("r#").to_string(), path, alias));
+        }
+        _ => {
+            if let Some(path) = path_text(node, src) {
+                let path = if path == "self" { prefix.to_string() } else { qualify(&path) };
+                out.push((path.rsplit("::").next().unwrap().trim_start_matches("r#").to_string(), path, node));
+            }
+        }
+    }
+}
+
+/// File roots and inline modules are independent import scopes; macro token trees are not Rust source scopes.
+fn path_modules(root: Node) -> Result<Vec<Node>, String> {
+    if root.has_error() { return Err("cannot inspect paths in a file with syntax errors".into()); }
+    let mut modules = vec![root];
+    walk(root, |n| {
+        if matches!(n.kind(), "macro_definition" | "token_tree" | "attribute_item" | "inner_attribute_item") { return false; }
+        if n.kind() == "mod_item" { if let Some(body) = n.child_by_field_name("body") { modules.push(body); } }
+        true
+    });
+    Ok(modules)
+}
+
+/// Visit plain paths within one module. Returning false skips the path's prefixes after accepting a whole-path match.
+fn walk_paths<'a>(module: Node<'a>, src: &str, mut f: impl FnMut(Node<'a>, String) -> bool) {
+    walk(module, |n| {
+        if matches!(
+            n.kind(), "mod_item" | "use_declaration" | "macro_definition" | "token_tree" | "attribute_item" | "inner_attribute_item" | "visibility_modifier"
+        ) { return false; }
+        if matches!(n.kind(), "scoped_identifier" | "scoped_type_identifier") && !src[n.byte_range()].contains('/') {
+            if let Some(path) = path_text(n, src) { return f(n, path); }
+        }
+        true
+    });
+}
+
+fn module_bindings<'a>(module: Node<'a>, src: &str) -> Vec<(String, String, Node<'a>)> {
+    let mut bindings = vec![];
+    for item in module.named_children(&mut module.walk()) {
+        if item.kind() == "use_declaration" {
+            use_bindings(item.child_by_field_name("argument").unwrap(), "", src, &mut bindings);
+        } else if item.kind() != "macro_definition" {
+            if let Some(name) = item.child_by_field_name("alias").or_else(|| item.child_by_field_name("name")) {
+                bindings.push((src[name.byte_range()].trim_start_matches("r#").to_string(), String::new(), name));
+            }
+        }
+    }
+    bindings
+}
+
+fn import_conflict<'a>(path: &str, bindings: &[(String, String, Node<'a>)]) -> Option<Node<'a>> {
+    let name = path.rsplit("::").next().unwrap().trim_start_matches("r#");
+    bindings.iter().find(|(bound, target, _)| bound == name && target != path).map(|(_, _, node)| *node)
+}
+
+/// Explicit, syntax-only refactoring. The caller is responsible for resolution, cfgs, shadowing and trait lookup effects.
+fn shorten_paths(src: &str, imports: &[Import]) -> Result<String, String> {
+    let tree = parse(src);
+    let mut edits = vec![];
+    for module in path_modules(tree.root_node())? {
+        let mut used = vec![None; imports.len()];
+        walk_paths(module, src, |n, path| {
+            if let Some(i) = imports.iter().position(|i| i.path == path) {
+                let name = imports[i].path.rsplit("::").next().unwrap();
+                edits.push((n.byte_range(), name.to_string()));
+                used[i] = Some(n);
+                return false;
+            }
+            true
+        });
+        let bindings = module_bindings(module, src);
+        let mut added = String::new();
+        let mut requested = HashMap::new();
+        for (import, node) in imports.iter().zip(used) {
+            let Some(node) = node else { continue };
+            if let Some(previous) = requested.insert(&import.name, &import.path) {
+                let pos = node.start_position();
+                return Err(format!("{}:{}: {} and {previous} both bind `{}` in this module", pos.row + 1, pos.column + 1, import.path, import.name));
+            }
+            if let Some(node) = import_conflict(&import.path, &bindings) {
+                let pos = node.start_position();
+                return Err(format!("{}:{}: `{}` conflicts with requested import `{}`", pos.row + 1, pos.column + 1, import.name, import.path));
+            }
+            let existing = bindings.iter().any(|(name, path, _)| name == &import.name && path == &import.path);
+            if !existing { added.push_str(&format!("use {};\n", import.path)); }
+        }
+        if !added.is_empty() {
+            // Leave inner docs/attributes first, and keep outer docs/attributes attached to their item.
+            let first = module.named_children(&mut module.walk()).find(|n| {
+                !matches!(n.kind(), "shebang" | "inner_attribute_item") && !(n.kind().contains("comment") && n.child_by_field_name("outer").is_none())
+            }).unwrap();
+            edits.push((first.start_byte()..first.start_byte(), added));
+        }
+    }
+    Ok(apply(src, edits))
+}
+
+struct Candidate { uses: usize, modules: usize, example: String, conflict: Option<String> }
+struct CandidateReport { path: String, uses: usize, modules: usize, max_file: usize, files: Vec<(PathBuf, Candidate)> }
+
+/// Types import directly; qualified free-function calls suggest their parent module, never an associated method.
+fn candidate_path<'a>(node: Node, path: &'a str) -> Option<&'a str> {
+    let type_name = |name: &str| {
+        let name = name.trim_start_matches("r#");
+        !name.contains('_') && name.chars().next().is_some_and(char::is_uppercase)
+    };
+    let mut segments = path.rsplit("::");
+    let name = segments.next().unwrap();
+    let typed_prefix = segments.any(type_name);
+    if type_name(name) && !typed_prefix { return Some(path); }
+    if typed_prefix { return None; }
+    let target = node.parent().filter(|n| n.kind() == "generic_function").unwrap_or(node);
+    let call = target.parent()?;
+    if call.kind() != "call_expression" || call.child_by_field_name("function") != Some(target) { return None; }
+    let prefix = path.rsplit_once("::")?.0;
+    prefix.trim_start_matches("::").contains("::").then_some(prefix)
+}
+
+fn collect_candidates(src: &str, file: &Path, candidates: &mut HashMap<String, Candidate>) -> Result<(), String> {
+    let tree = parse(src);
+    let location = |node: Node| {
+        let pos = node.start_position();
+        format!("{}:{}:{}", file.display(), pos.row + 1, pos.column + 1)
+    };
+    for module in path_modules(tree.root_node())? {
+        let bindings = module_bindings(module, src);
+        let mut counts = HashMap::new();
+        walk_paths(module, src, |node, path| {
+            if let Some(path) = candidate_path(node, &path) {
+                let count = counts.entry(path.to_string()).or_insert((0, node));
+                count.0 += 1;
+                return false;
+            }
+            true
+        });
+        for (path, (uses, node)) in counts {
+            let conflict = import_conflict(&path, &bindings).map(location);
+            let candidate = candidates.entry(path).or_insert_with(|| Candidate { uses: 0, modules: 0, example: location(node), conflict: None });
+            candidate.uses += uses;
+            candidate.modules += 1;
+            if candidate.conflict.is_none() { candidate.conflict = conflict; }
+        }
+    }
+    Ok(())
+}
+
+fn print_candidates(files: &[PathBuf], json: bool) -> Result<(), String> {
+    let mut candidates: HashMap<String, Vec<(PathBuf, Candidate)>> = HashMap::new();
+    for file in files {
+        let src = fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        let mut local = HashMap::new();
+        collect_candidates(&src, file, &mut local).map_err(|e| format!("{}: {e}", file.display()))?;
+        for (path, c) in local { candidates.entry(path).or_default().push((file.clone(), c)); }
+    }
+    let mut rows: Vec<_> = candidates.into_iter().filter_map(|(path, files)| {
+        let max_file = files.iter().map(|(_, c)| c.uses).max().unwrap();
+        if max_file < 2 { return None; }
+        let uses = files.iter().map(|(_, c)| c.uses).sum();
+        let modules = files.iter().map(|(_, c)| c.modules).sum();
+        Some(CandidateReport { path, uses, modules, max_file, files })
+    }).collect();
+    rows.sort_by(|a, b| b.uses.cmp(&a.uses).then(a.path.cmp(&b.path)));
+    let mut names = HashMap::new();
+    for row in &rows { *names.entry(row.path.rsplit("::").next().unwrap().trim_start_matches("r#")).or_insert(0) += 1; }
+    let shared = |path: &str| names[path.rsplit("::").next().unwrap().trim_start_matches("r#")] > 1;
+    if json {
+        let output: Vec<_> = rows.iter().map(|row| {
+            let files: Vec<_> = row.files.iter().map(|(file, c)| {
+                serde_json::json!({
+                    "file": file, "uses": c.uses, "modules": c.modules, "example": c.example, "conflict": c.conflict
+                })
+            }).collect();
+            serde_json::json!({"path": row.path, "uses": row.uses, "modules": row.modules, "max_file": row.max_file,
+        "files": files, "shared_name": shared(&row.path)})
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        return Ok(());
+    }
+    let width = rows.iter().map(|r| r.path.chars().count()).max().unwrap_or(4).max(4);
+    println!("uses  modules  max/file  {:width$}  files (uses)", "path");
+    for row in &rows {
+        let path = &row.path;
+        let locations: Vec<_> = row.files.iter().map(|(_, c)| {
+            let conflict = c.conflict.as_ref().map_or(String::new(), |at| format!(" [conflict: {at}]"));
+            format!("{} ({}){conflict}", c.example, c.uses)
+        }).collect();
+        let note = if shared(path) { " [shared short name]" } else { "" };
+        println!("{:>4}  {:>7}  {:>8}  {path:width$}  {}{note}", row.uses, row.modules, row.max_file, locations.join(", "));
+    }
+    Ok(())
 }
 
 fn line_start(src: &str, pos: usize) -> usize { src[..pos].rfind('\n').map_or(0, |p| p + 1) }
@@ -375,23 +677,29 @@ fn join_comment_lines(src: &str) -> String {
     apply(src, edits.into_iter().map(|range| (range, " ".to_string())).collect())
 }
 
-/// Format `src` with rustfmt (stdin mode, sharing our width cap), then compact.
+/// Merge imports after rustfmt's ordering, rerunning rustfmt for group layout until no imports merge, then compact.
 fn fastfmt(src: &str, edition: &str, width: usize, join_comments: bool) -> Result<String, String> {
-    let mut child = Command::new("rustfmt").args([
-        "--edition", edition, "--emit", "stdout", "--config",
-        &format!("max_width={width},use_small_heuristics=Max,use_field_init_shorthand=true,disable_all_formatting=false"),
-    ]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("failed to run rustfmt: {e}"))?;
-    child.stdin.take().unwrap().write_all(src.as_bytes()).map_err(|e| e.to_string())?;
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !out.status.success() { return Err(String::from_utf8_lossy(&out.stderr).into_owned()); }
-    let out = compact(&String::from_utf8_lossy(&out.stdout), width);
-    Ok(if join_comments { join_comment_lines(&out) } else { out })
+    let mut input = src.to_string();
+    loop {
+        let mut child = Command::new("rustfmt").args([
+            "--edition", edition, "--emit", "stdout", "--config",
+            &format!("max_width={width},use_small_heuristics=Max,use_field_init_shorthand=true,disable_all_formatting=false"),
+        ]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("failed to run rustfmt: {e}"))?;
+        child.stdin.take().unwrap().write_all(input.as_bytes()).map_err(|e| e.to_string())?;
+        let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        if !out.status.success() { return Err(String::from_utf8_lossy(&out.stderr).into_owned()); }
+        let formatted = String::from_utf8_lossy(&out.stdout);
+        let merged = merge_imports(&formatted);
+        if merged != formatted { input = merged; continue; }
+        let out = compact(&formatted, width);
+        return Ok(if join_comments { join_comment_lines(&out) } else { out });
+    }
 }
 
 /// The value at `key` in the nearest config file at or above `path`.
 fn toml_lookup(path: &Path, file: &str, key: &str) -> Option<String> {
     for dir in path.canonicalize().unwrap_or_else(|_| path.to_path_buf()).ancestors() {
-        if let Ok(t) = std::fs::read_to_string(dir.join(file)) {
+        if let Ok(t) = fs::read_to_string(dir.join(file)) {
             return t.lines().find(|l| l.trim_start().starts_with(key)).and_then(|l| l.split('=').nth(1)).map(|v| v.trim().trim_matches('"').to_string());
         }
     }
@@ -403,7 +711,7 @@ struct Config { edition: String, join_comments: bool }
 
 impl Default for Config { fn default() -> Self { Self { edition: "2021".into(), join_comments: false } } }
 
-fn join_comments_setting(metadata: &serde_json::Value) -> Result<Option<bool>, String> {
+fn join_comments_setting(metadata: &Value) -> Result<Option<bool>, String> {
     match metadata.get("fastfmt").and_then(|settings| settings.get("join_comments")) {
         None => Ok(None), Some(value) => value.as_bool().map(Some).ok_or("fastfmt.join_comments must be a boolean".into())
     }
@@ -421,7 +729,7 @@ fn config_for(path: &Path, configs: &mut HashMap<PathBuf, Config>) -> Result<Con
     let out = Command::new("cargo").args(["metadata", "--no-deps", "--offline", "--format-version", "1", "--manifest-path"]).arg(&manifest).output()
         .map_err(|e| format!("failed to run cargo metadata: {e}"))?;
     if !out.status.success() { return Err(String::from_utf8_lossy(&out.stderr).into_owned()); }
-    let metadata: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("invalid cargo metadata: {e}"))?;
+    let metadata: Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("invalid cargo metadata: {e}"))?;
     let workspace_join_comments = join_comments_setting(&metadata["metadata"])?.unwrap_or(false);
     let packages = metadata["packages"].as_array().ok_or("cargo metadata has no packages")?;
     for package in packages {
@@ -477,13 +785,13 @@ fn guard_rustfmt(paths: &[PathBuf], check: bool) -> Result<Vec<PathBuf>, String>
     let mut dirty = vec![];
     for path in configs {
         if ignored(&path)? { continue; }
-        let old = match std::fs::read_to_string(&path) {
+        let old = match fs::read_to_string(&path) {
             Ok(s) => s, Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(), Err(e) => return Err(format!("{}: {e}", path.display()))
         };
         let new = guarded_config(&old);
         if new == old { continue; }
         dirty.push(path.clone());
-        if !check { std::fs::write(&path, new).map_err(|e| format!("{}: {e}", path.display()))? }
+        if !check { fs::write(&path, new).map_err(|e| format!("{}: {e}", path.display()))? }
     }
     Ok(dirty)
 }
@@ -492,7 +800,7 @@ fn ignore_root(path: &Path) -> &Path { path.ancestors().find(|p| p.join(".git").
 
 /// Walk roots bypass ignore rules, so check explicit targets and prospective configs separately.
 fn ignored(path: &Path) -> Result<bool, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cwd = env::current_dir().map_err(|e| e.to_string())?;
     let mut matcher = WalkBuilder::new(ignore_root(&cwd)).build_matchers().remove(0);
     let relative = if let Some(relative) = matcher.normalize(path) { relative } else {
         let path = std::path::absolute(path).map_err(|e| e.to_string())?;
@@ -514,45 +822,131 @@ fn rs_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
-fn main() {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
+fn run() -> Result<i32, String> {
+    let mut args: Vec<String> = env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "fastfmt") { args.remove(0); } // invoked as `cargo fastfmt`
-    let check = args.iter().any(|a| a == "--check");
-    let width_flag = args.iter().position(|a| a == "--width").and_then(|i| args.get(i + 1)).and_then(|w| w.parse().ok());
+    let mode = match args.first().map(String::as_str) { Some("shorten" | "candidates") => args.remove(0), _ => String::new() };
+    let imports = if mode == "shorten" {
+        if args.first().is_none_or(|a| a.starts_with('-')) { return Err("usage: cargo fastfmt shorten IMPORTS_FILE [--check] [--width N] [PATH ...]".into()); }
+        let file = args.remove(0);
+        let src = fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?;
+        Some(import_paths(&src).map_err(|e| format!("{file}:{e}"))?)
+    } else { None };
+    let mut check = false;
+    let mut json = false;
+    let mut width_flag = None;
     let mut paths: Vec<PathBuf> = vec![];
-    let mut skip = false;
-    for (i, a) in args.iter().enumerate() {
-        if skip { skip = false; continue; }
-        match a.as_str() { "--check" => {} "--width" => skip = true, _ if i > 0 && args[i - 1] == "--width" => {} p => paths.push(p.into()) }
-    }
-    if paths.is_empty() { paths.push(".".into()) }
-    let mut files = vec![];
-    for path in &paths { if let Err(e) = rs_files(path, &mut files) { eprintln!("{e}"); std::process::exit(2) } }
-    files.sort();
-    files.dedup();
-    let dirty_configs = match guard_rustfmt(&files, check) { Ok(paths) => paths, Err(e) => { eprintln!("{e}"); std::process::exit(2) } };
-    let mut dirty = vec![];
-    let mut configs = HashMap::new();
-    for f in &files {
-        let src = match std::fs::read_to_string(f) { Ok(s) => s, Err(e) => { eprintln!("{}: {e}", f.display()); std::process::exit(2) } };
-        match config_for(f, &mut configs).and_then(|config| fastfmt(&src, &config.edition, width_for(f, width_flag), config.join_comments)) {
-            Ok(new) if new != src => {
-                if check { dirty.push(f) } else if let Err(e) = std::fs::write(f, &new) { eprintln!("{}: {e}", f.display()); std::process::exit(2) }
-            }
-            Ok(_) => {}
-            Err(e) => { eprintln!("{}: {e}", f.display()); std::process::exit(2) }
+    let mut args = args.into_iter();
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--check" => check = true, "--json" => json = true,
+            "--width" => width_flag = Some(args.next().and_then(|w| w.parse::<usize>().ok()).filter(|w| *w > 0).ok_or("--width requires a positive integer")?),
+            p => paths.push(p.into())
         }
     }
-    if check && (!dirty.is_empty() || !dirty_configs.is_empty()) {
-        for f in dirty_configs { println!("would update {}", f.display()) }
-        for f in dirty { println!("would reformat {}", f.display()) }
-        std::process::exit(1);
+    if mode == "candidates" && (check || width_flag.is_some()) { return Err("usage: cargo fastfmt candidates [--json] [PATH ...]".into()); }
+    if json && mode != "candidates" { return Err("--json is only supported by candidates".into()); }
+    if paths.is_empty() { paths.push(".".into()) }
+    let mut files = vec![];
+    for path in &paths { rs_files(path, &mut files)?; }
+    files.sort();
+    files.dedup();
+    if mode == "candidates" { print_candidates(&files, json)?; return Ok(0); }
+    let mut changes = vec![];
+    let mut configs = HashMap::new();
+    for f in &files {
+        let src = fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?;
+        let new = match &imports {
+            Some(imports) => shorten_paths(&src, imports), None => Ok(src.clone())
+        }.and_then(|src| config_for(f, &mut configs).and_then(|c| fastfmt(&src, &c.edition, width_for(f, width_flag), c.join_comments)))
+        .map_err(|e| format!("{}:{e}", f.display()))?;
+        if new != src { changes.push((f, new)); }
     }
+    // Plan every source edit before writing anything: a collision or parse error must not leave a partial refactor.
+    let dirty_configs = guard_rustfmt(&files, check)?;
+    if check && (!changes.is_empty() || !dirty_configs.is_empty()) {
+        for f in dirty_configs { println!("would update {}", f.display()) }
+        for (f, _) in changes { println!("would reformat {}", f.display()) }
+        return Ok(1);
+    }
+    for (f, new) in changes { fs::write(f, new).map_err(|e| format!("{}: {e}", f.display()))?; }
+    Ok(0)
 }
+
+fn main() { std::process::exit(match run() { Ok(code) => code, Err(e) => { eprintln!("{e}"); 2 } }); }
 
 #[cfg(test)]
 mod tests {
-    use super::{compact, fastfmt, guarded_config, join_comment_lines};
+    use super::{compact, fastfmt, guarded_config, import_paths, join_comment_lines, merge_imports, shorten_paths};
+
+    #[test]
+    fn merges_adjacent_imports_without_crossing_boundaries() {
+        for (src, want) in [
+            ("use ::exhash::EditResult;\nuse ::exhash::FileEdit;\nuse ::exhash::FileError;", "use ::exhash::{EditResult, FileEdit, FileError};"),
+            ("use x::{A, B,};\nuse x::C;", "use x::{A, B, C};"), ("use x::A as Local;\nuse x::B;", "use x::{A as Local, B};"),
+            ("use x::*;\nuse x::A;", "use x::{*, A};"), ("pub(crate) use x::A;\npub(crate) use x::B;", "pub(crate) use x::{A, B};"),
+            ("fn f() { use x::A; use x::B; }", "fn f() { use x::{A, B}; }"),
+        ] {
+            assert_eq!(merge_imports(src), want);
+            assert_eq!(merge_imports(want), want);
+        }
+        for src in [
+            "use x::A;\n// keep\nuse x::B;", "use x::A; // keep\nuse x::B;", "use x::A;\nuse x::B; // keep", "#[cfg(test)]\nuse x::A;\nuse x::B;",
+            "use x::A;\n#[cfg(test)]\nuse x::B;", "/// docs\nuse x::A;\nuse x::B;", "use x::A;\n\nuse x::B;", "use x::A;\npub use x::B;",
+            "#[cfg(test)]\n// explanation\nuse x::A;\nuse x::B;", "/// docs\n// explanation\nuse x::A;\nuse x::B;", "use x::A;\nuse y::B;",
+            "use x::{A /* keep */};\nuse x::B;", "use x::{};\nuse x::B;", "macro_rules! m { () => { use x::A; use x::B; }; }",
+        ] { assert_eq!(merge_imports(src), src); }
+    }
+
+    #[test]
+    fn shortens_path_nodes_without_touching_opaque_text() {
+        let imports = import_paths("crate::float::Native\n").unwrap();
+        for (src, want) in [
+            ("type T = crate :: float :: Native;", "type T = Native;"), ("type T = crate::float::Native<u8>;", "type T = Native<u8>;"),
+            ("fn f() { crate::float::Native::new(); }", "fn f() { Native::new(); }"),
+            ("fn f() { crate::float::Native::<u8>::new(); }", "fn f() { Native::<u8>::new(); }"),
+            ("type T = <crate::float::Native as Trait>::Item;", "type T = <Native as Trait>::Item;"),
+            ("type T = Wrap<crate::float::Native>;", "type T = Wrap<Native>;"),
+        ] {
+            let out = shorten_paths(src, &imports).unwrap();
+            assert_eq!(out, format!("use crate::float::Native;\n{want}"));
+            assert_eq!(shorten_paths(&out, &imports).unwrap(), out);
+        }
+        let src = r##"// crate::float::Native
+const S: &str = "crate::float::Native";
+const R: &str = r#"crate::float::Native"#;
+type T = crate /* keep */ ::float::Native;
+type U = crate::float::NativeExtra;
+use crate::float::Native;
+#[crate::float::Native]
+fn f() { m!(crate::float::Native); }
+macro_rules! m { () => { $crate::float::Native }; }
+"##;
+        assert_eq!(shorten_paths(src, &imports).unwrap(), src);
+    }
+
+    #[test]
+    fn rejects_conflicting_imports_and_items() {
+        let imports = import_paths("crate::float::Native").unwrap();
+        for declaration in [
+            "use other::Native;", "use other::{Native};", "use other::X as Native;", "use other::{self as Native};", "struct Native;", "type Native = u8;",
+            "mod Native {}", "extern crate other as Native;",
+        ] {
+            let src = format!("{declaration}\nfn f() -> crate::float::Native {{ todo!() }}");
+            let err = shorten_paths(&src, &imports).unwrap_err();
+            assert!(err.starts_with("1:"), "{err}");
+            assert!(err.contains("`Native` conflicts"), "{err}");
+        }
+        let shared = import_paths("crate::float::Native\nother::Native").unwrap();
+        assert!(shorten_paths("type A = crate::float::Native; type B = other::Native;", &shared).unwrap_err().contains("both bind `Native`"));
+        let src = "mod a { type T = crate::float::Native; } mod b { type T = other::Native; }";
+        let out = shorten_paths(src, &shared).unwrap();
+        assert!(out.contains("use crate::float::Native;") && out.contains("use other::Native;"));
+        assert_eq!(shorten_paths(&out, &shared).unwrap(), out);
+        for invalid in ["Native", "crate::float::*", "crate::float::{Native}", "crate::float::Native as N", "crate::float::Native; fn f() {}"] {
+            assert!(import_paths(invalid).is_err(), "{invalid}");
+        }
+    }
 
     /// Format `src` at `width`, asserting that a second pass changes nothing.
     fn stable(src: &str, width: usize) -> String {
