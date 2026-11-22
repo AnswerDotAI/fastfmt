@@ -5,9 +5,14 @@ edition = "2021"
 license = "Apache-2.0"
 description = "cargo fmt plus fastai-style compaction: keeps simple one-line constructs on one line"
 
+[lib]
+doctest = false
+test = false
+
 [[bin]]
 name = "cargo-fastfmt"
 path = "src/main.rs"
+test = false
 
 [package.metadata.fastfmt]
 join_comments = true
