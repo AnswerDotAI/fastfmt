@@ -14,6 +14,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - uses: AnswerDotAI/.github/actions/sccache@main
+        with:
+          r2-url: ${{ secrets.SCCACHE_R2 }}
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -31,6 +34,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - uses: AnswerDotAI/.github/actions/sccache@main
+        if: runner.os != 'Linux'
+        with:
+          r2-url: ${{ secrets.SCCACHE_R2 }}
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
