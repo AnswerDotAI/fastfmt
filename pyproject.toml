@@ -13,7 +13,8 @@ authors = [{name = "Jeremy Howard", email = "github@jhoward.fastmail.fm"}]
 classifiers = ["Programming Language :: Rust"]
 
 [project.optional-dependencies]
-dev = ["fastship>=0.0.11", "maturin>=1.0,<2.0", "pytest"]
+test = ["pytest"]
+dev = ["fastship>=0.0.11", "maturin>=1.0,<2.0", "fastfmt[test]"]
 
 [project.urls]
 Homepage = "https://github.com/AnswerDotAI/fastfmt"
