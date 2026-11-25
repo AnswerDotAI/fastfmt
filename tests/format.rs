@@ -326,3 +326,48 @@ fn keeps_what_must_stay() {
     let long = format!("fn f() {{\n    {}()\n}}\n", "x".repeat(160));
     assert_eq!(compact(&long, 150), long); // width cap
 }
+
+#[test]
+fn joins_attrs_with_short_decls() {
+    let want = r#"#![allow(unused)]
+/// Module docs.
+#[cfg(feature = "full")] use serde::Deserialize;
+#[cfg(feature = "full")] #[allow(unused)] pub mod cells;
+#[cfg(feature = "full")] pub use export::{dlg2md, dlg2md_nb, msg2md, msg2md_in, msg2text, msgs2py};
+#[cfg(unix)] extern crate alloc;
+#[cfg(unix)] const N: usize = 1;
+#[cfg(unix)] static S: usize = 2;
+#[cfg(unix)] type T = usize;
+trait Tr {
+    #[cfg(unix)] type Item;
+    #[cfg(unix)] fn sig(&self);
+}
+extern "C" {
+    #[cfg(unix)] fn ext();
+}
+struct Big {
+    /// First field.
+    #[cfg(unix)] pub a: usize,
+}
+enum Kind {
+    /// First variant.
+    #[cfg(unix)] A,
+}
+fn f() {
+    #[allow(unused)] let x = 1;
+    work(x);
+}
+"#;
+    assert_eq!(stable(&want.replace("] ", "]\n"), 160), want);
+    let stacked = "#[cfg(feature = \"full\")]\n#[allow(unused)]\npub mod cells;\n";
+    let joined = "#[cfg(feature = \"full\")] #[allow(unused)] pub mod cells;\n";
+    assert_eq!(stable(stacked, joined.len() - 1), joined);
+    assert_eq!(stable(stacked, joined.len() - 2), stacked);
+    for keep in [
+        "#[derive(Clone)]\nstruct S { x: usize }\n", "#[derive(Clone)]\nstruct Unit;\n", "#[derive(Clone)]\nenum E { A }\n",
+        "#[inline]\nfn g() -> usize { 1 }\n", "#[cfg(unix)]\nmod inner { fn h() {} }\n", "#[cfg(unix)] // note\npub mod a;\n",
+        "#[cfg(unix)]\n// note\n#[allow(unused)]\npub mod a;\n", "#[cfg(unix)]\n\npub mod a;\n", "#[cfg(\n    unix,\n)]\n#[allow(unused)]\npub mod a;\n",
+        "#[cfg(unix)]\nconst BIG: usize = {\n    a();\n    b();\n    c()\n};\n",
+        "macro_rules! m {\n    () => {\n        #[cfg(unix)]\n        pub mod a;\n    };\n}\n",
+    ] { assert_eq!(compact(keep, 160), keep, "changed: {keep}"); }
+}

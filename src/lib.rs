@@ -597,6 +597,50 @@ fn format_elses(src: &str, width: usize) -> String {
     apply(src, edits)
 }
 
+fn attr_decl(node: Node) -> bool {
+    matches!(
+        node.kind(), "use_declaration" | "extern_crate_declaration" | "const_item" | "static_item" | "type_item" | "associated_type" | "function_signature_item"
+            | "let_declaration" | "field_declaration" | "enum_variant"
+    ) || node.kind() == "mod_item" && node.child_by_field_name("body").is_none()
+}
+
+/// Join contiguous single-line outer attributes onto a following single-line bodyless declaration when the line fits `width`.
+fn join_attrs(src: &str, width: usize) -> String {
+    let tree = parse(src);
+    let mut edits = vec![];
+    walk(tree.root_node(), |n| {
+        if matches!(n.kind(), "macro_definition" | "token_tree") { return false; }
+        if !attr_decl(n) || !one_row(n) { return true; }
+        let mut attrs = vec![];
+        let mut prev = n.prev_named_sibling();
+        while let Some(p) = prev {
+            if p.kind() == "attribute_item" { attrs.push(p); }
+            else if p.kind().contains("comment") {
+                let mut scan = p.prev_named_sibling();
+                while let Some(s) = scan {
+                    if s.kind() == "attribute_item" { return false; }
+                    if !s.kind().contains("comment") { break; }
+                    scan = s.prev_named_sibling();
+                }
+                break;
+            } else { break; }
+            prev = p.prev_named_sibling();
+        }
+        if attrs.is_empty() { return false; }
+        attrs.reverse();
+        let first = attrs[0];
+        let prefix = &src[line_start(src, first.start_byte())..first.start_byte()];
+        if !prefix.trim().is_empty() || attrs.iter().any(|a| !one_row(*a)) { return false; }
+        let gaps: Vec<_> = attrs.iter().enumerate().map(|(i, a)| a.end_byte()..attrs.get(i + 1).copied().unwrap_or(n).start_byte()).collect();
+        if !gaps.iter().any(|g| src[g.clone()].contains('\n'))
+            || gaps.iter().any(|g| !src[g.clone()].trim().is_empty() || src[g.clone()].matches('\n').count() > 1) { return false; }
+        let len = prefix.len() + attrs.iter().map(|a| a.end_byte() - a.start_byte() + 1).sum::<usize>() + line_end(src, n.end_byte()) - n.start_byte();
+        if len <= width { edits.extend(gaps.into_iter().filter(|g| &src[g.clone()] != " ").map(|g| (g, " ".into()))); }
+        false
+    });
+    apply(src, edits)
+}
+
 pub fn compact(src: &str, width: usize) -> String {
     let mut cur = src.to_string();
     loop {
@@ -604,7 +648,7 @@ pub fn compact(src: &str, width: usize) -> String {
         if next == cur { break; }
         cur = next;
     }
-    format_elses(&cur, width)
+    join_attrs(&format_elses(&cur, width), width)
 }
 
 struct CommentLine<'a> { start: usize, body: usize, end: usize, prefix: &'a str }

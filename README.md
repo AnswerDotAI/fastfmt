@@ -93,6 +93,7 @@ A construct can join onto one line when it fits its budget and contains no comme
 - Blocks, including function, closure, `if`/`else`, loop and match-arm bodies, with at most one statement, optionally followed by a tail expression or by `break`, `continue` or `return`. A block whose first statement is an `if`/`else` chain doesn't join.
 - Single-item `impl` blocks.
 - Struct fields, enum variants, simple match arms, nested `use` declarations and other comma-separated lists, limited by width rather than item count.
+- Single-line bodyless declarations (`use`, bodyless `mod`, `extern crate`, `const`, `static`, `type`, trait and `extern` signatures, `let`, struct fields, and enum variants) with contiguous single-line outer attributes (`#[...]`) above them, up to the hard line cap. Stacked attributes join all together or stay stacked; `#[...]` on `struct`, `enum`, `fn`, `impl`, and inline `mod` stays on its own line.
 
 Semicolons are preserved exactly. Statement chains and multiline/over-width value chains separate `else if` and compact `else` branches after compact bodies. Multiline branch braces keep `} else {` attached. Value chains that fit entirely on one line stay inline.
 
