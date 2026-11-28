@@ -7,7 +7,7 @@ name = "fastfmt"
 dynamic = ["version"]
 description = "cargo fmt plus fastai-style compaction: keeps simple one-line constructs on one line"
 license = "Apache-2.0"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 readme = "README.md"
 authors = [{name = "Jeremy Howard", email = "github@jhoward.fastmail.fm"}]
 classifiers = ["Programming Language :: Rust"]
@@ -21,6 +21,7 @@ Homepage = "https://github.com/AnswerDotAI/fastfmt"
 Repository = "https://github.com/AnswerDotAI/fastfmt"
 Issues = "https://github.com/AnswerDotAI/fastfmt/issues"
 
+Documentation = "https://AnswerDotAI.github.io/fastfmt/"
 [tool.maturin]
 bindings = "bin"
 
